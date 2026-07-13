@@ -1,0 +1,9 @@
+[project]
+name = "session-countdown"
+version = "0.1.0"
+description = "Raspberry Pi-first session countdown with local-network control"
+requires-python = ">=3.11"
+dependencies = ["fastapi==0.116.1", "pydantic==2.11.7", "uvicorn[standard]==0.35.0"]
+
+[tool.ruff]
+line-length = 100
