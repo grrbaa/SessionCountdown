@@ -38,11 +38,24 @@ class Session(BaseModel):
     milestones: list[Milestone] = Field(default_factory=list)
 
 
+class DisplayOptions(BaseModel):
+    show_event: bool = True
+    show_circuit: bool = True
+    show_clock: bool = True
+    show_next_action_label: bool = True
+    show_action: bool = True
+    show_countdown: bool = True
+    show_session: bool = True
+    show_message: bool = True
+    show_connection: bool = True
+
+
 class Timetable(BaseModel):
     event_name: str = Field(default="Race Event", max_length=160)
     circuit: str = Field(default="", max_length=160)
     category: str = Field(default="", max_length=160)
     message: str = Field(default="", max_length=240)
+    display_options: DisplayOptions = Field(default_factory=DisplayOptions)
     sessions: list[Session] = Field(default_factory=list)
     updated_at: datetime | None = None
 
@@ -122,7 +135,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="SessionCountdown Controller", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="SessionCountdown Controller", version="0.2.1", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
