@@ -1,64 +1,33 @@
 # SessionCountdown
 
-Raspberry Pi-first race-session countdown display with browser control over the same local Wi-Fi network.
+Windows-master race-session controller with Raspberry Pi display clients.
 
-## Architecture
+## Roles
 
-- **Raspberry Pi:** owns the timetable, stores it locally, serves the control page, and runs the display.
-- **Windows laptop:** opens the control page in a browser and sends timetable changes to the Pi.
-- **Offline-safe:** after a timetable has been saved, the Pi continues independently if the laptop disconnects.
-- **No cloud required:** HTTP and WebSocket traffic stays on the local network.
+- **Windows laptop:** owns events, PDF imports, timetable editing and live control.
+- **Raspberry Pi:** fullscreen display only. It caches the latest schedule and reconnects automatically.
 
-## Current milestone: Pi network foundation
+## Start the Windows controller
 
-The repository now includes:
+```bat
+scripts\start_controller_windows.bat
+```
 
-- fullscreen browser display at `/display`
-- timetable editor at `/`
-- JSON timetable API
-- WebSocket live updates
-- atomic local timetable storage
-- Raspberry Pi install and start scripts
-- systemd service template
+Open `http://localhost:8080`. The controller listens on the laptop's network interfaces so Pi displays can connect.
 
-## Raspberry Pi installation
+## Start a Pi display
 
 ```bash
-git clone https://github.com/grrbaa/SessionCountdown.git
-cd SessionCountdown
-chmod +x scripts/install_pi.sh
-./scripts/install_pi.sh
-./scripts/start_pi.sh
+sudo apt update
+sudo apt install -y chromium
+chmod +x scripts/start_display_pi.sh
+DISPLAY_ID="Garage" ./scripts/start_display_pi.sh http://LAPTOP-IP:8080
 ```
 
-Open from the Windows laptop:
+Find the laptop IP with `ipconfig`. Both machines must be on the same Wi-Fi and Windows Firewall must allow Python on private networks.
 
-```text
-http://session-countdown.local:8080/
-```
+## PDF import
 
-Open on the Raspberry Pi display:
+The controller can read a schedule PDF, detect supported categories, then extract the selected category into an editable timetable. Procedure milestones are optional: schedules without trolley, pit-lane or board details still import their ordinary sessions.
 
-```text
-http://localhost:8080/display
-```
-
-If mDNS is unavailable, replace `session-countdown.local` with the Pi's IP address.
-
-## Development
-
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux:   source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn session_countdown.main:app --reload --host 0.0.0.0 --port 8080
-```
-
-## Next milestones
-
-1. Import the original visual identity and circuit assets.
-2. Add drag-and-drop session ordering and bulk delay controls.
-3. Add password/PIN protection for timetable editing.
-4. Add Chromium kiosk autostart on Raspberry Pi.
-5. Add import from RaceOps and timetable/run-sheet files.
+The first validated importer format is the 2026 Paul Ricard GT Sport schedule. It extracts E4 practice, qualifying and race sessions, plus available race-procedure milestones.
