@@ -18,6 +18,7 @@ from pypdf import PdfReader
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_DIR = ROOT / "session_countdown" / "static"
+UPLOAD_DIR = STATIC_DIR / "uploads"
 DATA_DIR = Path(os.getenv("SESSION_COUNTDOWN_DATA_DIR", ROOT / "data"))
 TIMETABLE_FILE = DATA_DIR / "timetable.json"
 
@@ -55,6 +56,7 @@ class Timetable(BaseModel):
     circuit: str = Field(default="", max_length=160)
     category: str = Field(default="", max_length=160)
     message: str = Field(default="", max_length=240)
+    logo_url: str = Field(default="", max_length=260)
     display_options: DisplayOptions = Field(default_factory=DisplayOptions)
     sessions: list[Session] = Field(default_factory=list)
     updated_at: datetime | None = None
@@ -92,9 +94,7 @@ class Store:
             for session in timetable.sessions:
                 session.milestones.sort(key=lambda item: item.time)
             temporary = self.path.with_suffix(".tmp")
-            temporary.write_text(
-                json.dumps(timetable.model_dump(mode="json"), indent=2), encoding="utf-8"
-            )
+            temporary.write_text(json.dumps(timetable.model_dump(mode="json"), indent=2), encoding="utf-8")
             temporary.replace(self.path)
             self.state = timetable
             return timetable
@@ -131,11 +131,12 @@ connections = Connections()
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     await store.load()
     yield
 
 
-app = FastAPI(title="SessionCountdown Controller", version="0.2.1", lifespan=lifespan)
+app = FastAPI(title="SessionCountdown Controller", version="0.2.2", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -151,12 +152,7 @@ async def display() -> FileResponse:
 
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "role": "controller",
-        "updated_at": store.state.updated_at,
-        "displays": connections.displays(),
-    }
+    return {"status": "ok", "role": "controller", "updated_at": store.state.updated_at, "displays": connections.displays()}
 
 
 @app.get("/api/timetable", response_model=Timetable)
@@ -172,6 +168,26 @@ async def put_timetable(timetable: Timetable) -> Timetable:
     saved = await store.save(timetable)
     await connections.broadcast({"type": "timetable", "payload": saved.model_dump(mode="json")})
     return saved
+
+
+@app.post("/api/logo")
+async def upload_logo(file: UploadFile = File(...)) -> dict[str, str]:
+    allowed = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+    extension = allowed.get(file.content_type or "")
+    if not extension:
+        raise HTTPException(status_code=400, detail="Logo must be PNG, JPG or WebP")
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Logo must be smaller than 5 MB")
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    for old in UPLOAD_DIR.glob("team_logo.*"):
+        old.unlink(missing_ok=True)
+    filename = f"team_logo{extension}"
+    (UPLOAD_DIR / filename).write_bytes(content)
+    store.state.logo_url = f"/static/uploads/{filename}?v={int(datetime.now().timestamp())}"
+    saved = await store.save(store.state)
+    await connections.broadcast({"type": "timetable", "payload": saved.model_dump(mode="json")})
+    return {"logo_url": saved.logo_url}
 
 
 @app.post("/api/import/pdf", response_model=ImportPreview)
@@ -205,51 +221,25 @@ async def websocket_endpoint(websocket: WebSocket, display_id: str = "Display") 
 
 def parse_schedule(text: str, selected_category: str | None) -> ImportPreview:
     clean = re.sub(r"[\u00ad\u200b\ufffe]", "", text)
-    categories = sorted(set(re.findall(
-        r"(?:\d{1,2}\.\d{2}(?:/\d{1,2}\.\d{2})?\s+(?:\d+´\s+)?)"
-        r"(E4 Championship|FIA Formula Regional|Euroformula Open|GT Cup Europe|International GT Open)",
-        clean,
-        flags=re.IGNORECASE,
-    )), key=str.lower)
+    categories = sorted(set(re.findall(r"(?:\d{1,2}\.\d{2}(?:/\d{1,2}\.\d{2})?\s+(?:\d+´\s+)?)(E4 Championship|FIA Formula Regional|Euroformula Open|GT Cup Europe|International GT Open)", clean, flags=re.IGNORECASE)), key=str.lower)
     canonical = {value.lower(): value for value in categories}
     category = canonical.get((selected_category or "").lower()) if selected_category else None
-
     event_name = "Race Event"
     event_match = re.search(r"(?im)^([A-Z][A-Z ]{2,})\s*\n\s*\d{1,2}\s*-\s*\d{1,2}\s+\w+\s+20\d{2}", clean)
     if event_match:
         event_name = event_match.group(1).title()
     elif "Paul Ricard" in clean:
         event_name = "Paul Ricard"
-    circuit = event_name
-
     warnings: list[str] = []
-    sessions: list[Session] = []
-    if category:
-        sessions = extract_sessions(clean, category, warnings)
-    confidence = 35
-    confidence += 15 if event_name != "Race Event" else 0
-    confidence += 20 if categories else 0
-    confidence += 25 if sessions else 0
-    confidence += 5 if not warnings else 0
-    return ImportPreview(
-        event_name=event_name,
-        circuit=circuit,
-        categories=categories,
-        selected_category=category,
-        sessions=sessions,
-        warnings=warnings,
-        confidence=min(confidence, 100),
-        raw_text=clean[:12000],
-    )
+    sessions = extract_sessions(clean, category, warnings) if category else []
+    confidence = 35 + (15 if event_name != "Race Event" else 0) + (20 if categories else 0) + (25 if sessions else 0) + (5 if not warnings else 0)
+    return ImportPreview(event_name=event_name, circuit=event_name, categories=categories, selected_category=category, sessions=sessions, warnings=warnings, confidence=min(confidence, 100), raw_text=clean[:12000])
 
 
 def extract_sessions(text: str, category: str, warnings: list[str]) -> list[Session]:
     year_match = re.search(r"20\d{2}", text)
     year = int(year_match.group(0)) if year_match else datetime.now().year
-    month_map = {
-        "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
-        "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
-    }
+    month_map = {"january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6, "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12}
     current_date: tuple[int, int, int] | None = None
     result: list[Session] = []
     lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
@@ -268,17 +258,15 @@ def extract_sessions(text: str, category: str, warnings: list[str]) -> list[Sess
         hour, minute = int(match.group(1)), int(match.group(2))
         end_hour = int(match.group(3)) if match.group(3) else None
         end_minute = int(match.group(4)) if match.group(4) else None
-        remainder = match.group(5).strip()
-        remainder = re.sub(r"^\d+´\s+", "", remainder)
+        remainder = re.sub(r"^\d+´\s+", "", match.group(5).strip())
         remainder = re.sub(r"^\(TV Live\)\s+", "", remainder, flags=re.I)
         event_text = re.sub(re.escape(category), "", remainder, flags=re.I).strip(" -")
         if not re.search(r"Free practice|Qualifying|Race", event_text, re.I):
             continue
-        name = normalize_session_name(event_text)
         start = datetime(*current_date, hour, minute)
         end = datetime(*current_date, end_hour, end_minute) if end_hour is not None else None
-        session = Session(name=name, start=start, end=end, source="pdf")
-        if re.search(r"Race", name, re.I):
+        session = Session(name=normalize_session_name(event_text), start=start, end=end, source="pdf")
+        if re.search(r"Race", session.name, re.I):
             session.milestones.extend(extract_nearby_milestones(lines, index, current_date, start))
         result.append(session)
     if not result:
@@ -293,14 +281,7 @@ def normalize_session_name(value: str) -> str:
 
 
 def extract_nearby_milestones(lines: list[str], race_index: int, date_parts: tuple[int, int, int], race_start: datetime) -> list[Milestone]:
-    names = {
-        "pre-grid": "Cars ready on Pre Grid", "cars ready": "Cars ready on Pre Grid",
-        "trolleys": "Trolleys to Pit Lane", "cars to access pitlane": "Cars to Pit Lane",
-        "fast lane open": "Fast Lane Open", "pit lane open": "Pit Lane Open",
-        "pit lane closed": "Pit Lane Closed", "5 min": "5 Minute Board",
-        "3 min": "3 Minute Board", "1 min": "1 Minute Board / Engine On",
-        "green flag": "Formation Lap",
-    }
+    names = {"pre-grid": "Cars ready on Pre Grid", "cars ready": "Cars ready on Pre Grid", "trolleys": "Trolleys to Pit Lane", "cars to access pitlane": "Cars to Pit Lane", "fast lane open": "Fast Lane Open", "pit lane open": "Pit Lane Open", "pit lane closed": "Pit Lane Closed", "5 min": "5 Minute Board", "3 min": "3 Minute Board", "1 min": "1 Minute Board / Engine On", "green flag": "Formation Lap"}
     events: list[Milestone] = []
     procedure_lines: list[str] = []
     for line in reversed(lines[max(0, race_index - 30):race_index]):
